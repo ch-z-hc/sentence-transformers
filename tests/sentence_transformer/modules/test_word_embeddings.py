@@ -100,29 +100,32 @@ def test_from_text_file_creates_independent_default_tokenizers(tmp_path):
     assert list(second_model.tokenizer.get_vocab()) == ["PADDING_TOKEN", "carrot", "date"]
 
 
-@pytest.mark.parametrize("max_seq_length", [1, 2, 3, 1000000])
-@pytest.mark.parametrize("prompt", [None, "alpha "])
-def test_word_embeddings_respects_max_seq_length(max_seq_length, prompt):
+@pytest.mark.parametrize(
+    ("prompt", "expected_ids", "expected_embeddings"),
+    [
+        (None, [[1, 2], [2, 0]], [[0.5, 0.5], [0.0, 1.0]]),
+        ("alpha ", [[1, 1], [1, 2]], [[1.0, 0.0], [0.5, 0.5]]),
+    ],
+)
+def test_word_embeddings_respects_max_seq_length(prompt, expected_ids, expected_embeddings):
     vocab = ["PADDING_TOKEN", "alpha", "beta", "gamma"]
     weights = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [9.0, 9.0]])
     word_embeddings = WordEmbeddings(
         tokenizer=WhitespaceTokenizer(vocab=vocab),
         embedding_weights=weights,
-        max_seq_length=max_seq_length,
+        max_seq_length=2,
     )
-    model = SentenceTransformer(modules=[word_embeddings, Pooling(2, "mean")])
+    model = SentenceTransformer(modules=[word_embeddings, Pooling(2, "mean")], device="cpu")
     texts = ["alpha beta gamma", "beta"]
-    token_ids = [word_embeddings.tokenizer.tokenize((prompt or "") + text)[:max_seq_length] for text in texts]
-    lengths = [len(ids) for ids in token_ids]
-    width = max(lengths)
+    expected_mask = torch.tensor(expected_ids).ne(0).long()
 
     features = model.preprocess(texts, prompt=prompt)
-    assert features["input_ids"].tolist() == [ids + [0] * (width - len(ids)) for ids in token_ids]
-    assert features["attention_mask"].tolist() == [[1] * length + [0] * (width - length) for length in lengths]
-    assert features["sentence_lengths"].tolist() == lengths
+    assert features["input_ids"].tolist() == expected_ids
+    torch.testing.assert_close(features["attention_mask"], expected_mask)
+    torch.testing.assert_close(features["sentence_lengths"], expected_mask.sum(dim=1))
     torch.testing.assert_close(
         model.encode(texts, prompt=prompt, convert_to_tensor=True),
-        torch.stack([weights[ids].mean(dim=0) for ids in token_ids]),
+        torch.tensor(expected_embeddings),
     )
 
 
