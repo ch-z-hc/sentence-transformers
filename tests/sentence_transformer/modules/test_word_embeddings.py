@@ -8,7 +8,7 @@ import torch
 
 import sentence_transformers.sentence_transformer.modules.word_embeddings as word_embeddings_module
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.sentence_transformer.modules import WordEmbeddings
+from sentence_transformers.sentence_transformer.modules import Pooling, WordEmbeddings
 from sentence_transformers.sentence_transformer.modules.tokenizer import WhitespaceTokenizer
 
 
@@ -98,6 +98,32 @@ def test_from_text_file_creates_independent_default_tokenizers(tmp_path):
     assert first_model.tokenizer is not second_model.tokenizer
     assert list(first_model.tokenizer.get_vocab()) == ["PADDING_TOKEN", "apple", "banana"]
     assert list(second_model.tokenizer.get_vocab()) == ["PADDING_TOKEN", "carrot", "date"]
+
+
+@pytest.mark.parametrize("max_seq_length", [1, 2, 3, 1000000])
+@pytest.mark.parametrize("prompt", [None, "alpha "])
+def test_word_embeddings_respects_max_seq_length(max_seq_length, prompt):
+    vocab = ["PADDING_TOKEN", "alpha", "beta", "gamma"]
+    weights = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [9.0, 9.0]])
+    word_embeddings = WordEmbeddings(
+        tokenizer=WhitespaceTokenizer(vocab=vocab),
+        embedding_weights=weights,
+        max_seq_length=max_seq_length,
+    )
+    model = SentenceTransformer(modules=[word_embeddings, Pooling(2, "mean")])
+    texts = ["alpha beta gamma", "beta"]
+    token_ids = [word_embeddings.tokenizer.tokenize((prompt or "") + text)[:max_seq_length] for text in texts]
+    lengths = [len(ids) for ids in token_ids]
+    width = max(lengths)
+
+    features = model.preprocess(texts, prompt=prompt)
+    assert features["input_ids"].tolist() == [ids + [0] * (width - len(ids)) for ids in token_ids]
+    assert features["attention_mask"].tolist() == [[1] * length + [0] * (width - length) for length in lengths]
+    assert features["sentence_lengths"].tolist() == lengths
+    torch.testing.assert_close(
+        model.encode(texts, prompt=prompt, convert_to_tensor=True),
+        torch.stack([weights[ids].mean(dim=0) for ids in token_ids]),
+    )
 
 
 def test_hf_tokenizer_preprocess_returns_token_id_lists(stsb_bert_tiny_model: SentenceTransformer):
